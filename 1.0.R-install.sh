@@ -1,6 +1,6 @@
 # path where you download and compile R
 #PathToDownlad=/mnt/work/source/
-mkdir work
+mkdir /home/vagrant/work
 mkdir /home/vagrant/work/source
 PathToDownlad=/home/vagrant/work/source/
 
