@@ -1,0 +1,147 @@
+- hosts: all
+  vars:
+    # Directories
+    bin_dir: "{{ ansible_user_dir }}/bin"
+    source_dir: "{{ ansible_user_dir }}/src"
+    install_dir: "{{ ansible_user_dir }}/R"
+
+    # R
+    r_version: 3.6.1
+    r_url: https://cran.r-project.org/src/base/R-3/R-{{ r_version }}.tar.gz
+    # The filters below strip URL and file ending to get correct path from r_url
+    r_source_dir: "{{ source_dir }}/{{ r_url | basename | splitext | first | splitext | first }}"
+    r_install_dir: "{{ install_dir }}/{{ r_url | basename | splitext | first | splitext | first }}"
+
+    # SAIGE
+    saige_version: 0.36.1
+    saige_release_url: "https://github.com/weizhouUMICH/SAIGE/releases/download/{{ saige_version }}/SAIGE_{{ saige_version }}_R_x86_64-pc-linux-gnu.tar.gz"
+    saige_dependency_url: "https://raw.githubusercontent.com/weizhouUMICH/SAIGE/{{ saige_version }}/extdata/install_packages.R"
+    saige_dir: "{{ source_dir }}/SAIGE"
+
+  tasks:
+  - name: Create directories
+    file:
+      path: "{{ item }}"
+      state: directory
+    loop:
+      - "{{ bin_dir }}"
+      - "{{ source_dir }}"
+      - "{{ install_dir }}"
+      - "{{ saige_dir }}"
+
+  # Install R
+  - name: Install apt dependencies for R {{ r_version }}
+    become: yes
+    apt:
+      name:
+        - tcl-dev
+        - tk-dev
+        - libopenblas-dev
+        - libbz2-dev
+        - liblzma-dev
+        - libpcre3-dev
+        - libcurl4-openssl-dev
+
+  - name: Download and extract R {{ r_version }} to {{ r_source_dir }}
+    unarchive:
+      src: "{{ r_url }}"
+      dest: "{{ source_dir }}"
+      creates: "{{ r_source_dir }}"
+      remote_src: yes
+
+  - name: Configure R {{ r_version }}
+    command: >
+      ./configure
+      --prefix={{ r_install_dir }}
+      --with-x=no
+      --enable-memory-profiling
+      --enable-R-shlib
+      --with-blas
+      --enable-shared
+      --with-tcltk
+      --with-tcl-config=/usr/lib/tclConfig.sh
+      --with-tk-config=/usr/lib/tkConfig.sh
+      --with-libtiff
+      --with-libpng
+      --with-jpeglib
+    args:
+      chdir: "{{ r_source_dir }}"
+      creates: "{{ r_source_dir }}/Makefile"
+
+  - name: Make R {{ r_version }}
+    make:
+      chdir: "{{ r_source_dir }}"
+      # target: -j "{{ ansible_processor_vcpus }}"
+
+  - name: Install R {{ r_version }}
+    make:
+      chdir: "{{ r_source_dir }}"
+      target: install
+
+  - name: Symlink R {{ r_version }} binaries to {{ bin_dir }}
+    file:
+      src: "{{ r_install_dir }}/bin/{{ item }}"
+      dest: "{{ bin_dir }}/{{ item }}"
+      state: link
+    loop:
+      - R
+      - Rscript
+
+  # Install SAIGE
+  - name: Install apt dependencies for SAIGE {{ saige_version }}
+    become: yes
+    apt:
+      name:
+        - python-pip
+        - cmake
+
+  - name: Install pip dependencies for SAIGE {{ saige_version }}
+    become: yes
+    pip:
+      name:
+        - cget
+
+  - name: Download SAIGE {{ saige_version }} release
+    get_url:
+      url: "{{ saige_release_url }}"
+      dest: "{{ saige_dir }}"
+
+  # Slight workaround to get the SAIGE dependency install script
+  # The SAIGE repository is large and we only need this file 
+  - name: Download SAIGE {{ saige_version }} dependency script
+    get_url:
+      url: "{{ saige_dependency_url }}"
+      dest: "{{ saige_dir }}"
+
+  # Workaround for https://github.com/weizhouUMICH/SAIGE/pull/147
+  - name: WORKAROUND - Change CRAN repo
+    replace:
+      path: "{{ saige_dir }}/{{ saige_dependency_url | basename }}"
+      regexp: "http://cran.us.r-project.org"
+      replace: "https://cloud.r-project.org"
+
+  - name: Install SAIGE {{ saige_version }} R dependencies
+    command: "{{ bin_dir }}/Rscript {{ saige_dir }}/{{ saige_dependency_url | basename }}"
+    args:
+      # Check if MetaSKAT is installed which is last dep
+      creates: "{{ r_install_dir }}/lib/R/library/MetaSKAT"
+
+  # Workaround for https://github.com/weizhouUMICH/SAIGE/issues/139#issuecomment-590100686
+  - name: WORKAROUND - Install libxml2-dev packages for devtools
+    become: yes
+    apt:
+      name: libxml2-dev
+    when: saige_version == "0.36.1"
+
+  - name: WORKAROUND - Copy script for downgrading required SPAtest 3.0.0
+    copy: 
+      src: install_SPAtest_3.0.0.R
+      dest: "{{ source_dir }}/install_SPAtest_3.0.0.R"
+    when: saige_version == "0.36.1"
+
+  - name: WORKAROUND - Downgrade to required SPAtest 3.0.0
+    command: "{{ bin_dir }}/Rscript {{ source_dir }}/install_SPAtest_3.0.0.R"
+    when: saige_version == "0.36.1"
+
+  - name: Install SAIGE {{ saige_version }}
+    command: "{{ bin_dir }}/R CMD INSTALL {{ saige_dir }}/{{ saige_release_url | basename }}"
