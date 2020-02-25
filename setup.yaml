@@ -29,11 +29,13 @@
       - "{{ install_dir }}"
       - "{{ saige_dir }}"
 
-  # Install R
-  - name: Install apt dependencies for R {{ r_version }}
-    become: yes
+
+  # R
+  - name: Install apt dependencies for compiling R {{ r_version }}
     apt:
       name:
+        - gcc
+        - g++
         - tcl-dev
         - tk-dev
         - libopenblas-dev
@@ -41,6 +43,9 @@
         - liblzma-dev
         - libpcre3-dev
         - libcurl4-openssl-dev
+        - libreadline-dev
+      install_recommends: no
+    become: yes
 
   - name: Download and extract R {{ r_version }} to {{ r_source_dir }}
     unarchive:
@@ -71,7 +76,7 @@
   - name: Make R {{ r_version }}
     make:
       chdir: "{{ r_source_dir }}"
-      # target: -j "{{ ansible_processor_vcpus }}"
+      target: -j{{ ansible_processor_vcpus }}
 
   - name: Install R {{ r_version }}
     make:
@@ -87,19 +92,23 @@
       - R
       - Rscript
 
-  # Install SAIGE
+
+  # SAIGE
   - name: Install apt dependencies for SAIGE {{ saige_version }}
-    become: yes
     apt:
       name:
+        - python-dev
         - python-pip
         - cmake
+        - libgit2-24
+        - libssl-dev
+      install_recommends: no
+    become: yes
 
   - name: Install pip dependencies for SAIGE {{ saige_version }}
     become: yes
     pip:
-      name:
-        - cget
+      name: cget
 
   - name: Download SAIGE {{ saige_version }} release
     get_url:
@@ -108,40 +117,82 @@
 
   # Slight workaround to get the SAIGE dependency install script
   # The SAIGE repository is large and we only need this file 
-  - name: Download SAIGE {{ saige_version }} dependency script
+  - name: WORKAROUND - Check if SAIGE R dependencies installer exists
+    stat:
+      path: "{{ saige_dir }}/{{ saige_dependency_url | basename }}"
+    register: dependency_stat_result
+
+  - name: Download SAIGE {{ saige_version }} R dependencies installer
     get_url:
       url: "{{ saige_dependency_url }}"
       dest: "{{ saige_dir }}"
+    when: not dependency_stat_result.stat.exists
 
   # Workaround for https://github.com/weizhouUMICH/SAIGE/pull/147
-  - name: WORKAROUND - Change CRAN repo
+  - name: WORKAROUND - Change CRAN repo in SAIGE {{ saige_version }} R dependencies installer
     replace:
       path: "{{ saige_dir }}/{{ saige_dependency_url | basename }}"
       regexp: "http://cran.us.r-project.org"
       replace: "https://cloud.r-project.org"
 
   - name: Install SAIGE {{ saige_version }} R dependencies
-    command: "{{ bin_dir }}/Rscript {{ saige_dir }}/{{ saige_dependency_url | basename }}"
+    command: >
+      {{ bin_dir }}/Rscript {{ saige_dir }}/{{ saige_dependency_url | basename }}
     args:
-      # Check if MetaSKAT is installed which is last dep
+      # Check if MetaSKAT is installed which is last dependency
       creates: "{{ r_install_dir }}/lib/R/library/MetaSKAT"
 
   # Workaround for https://github.com/weizhouUMICH/SAIGE/issues/139#issuecomment-590100686
-  - name: WORKAROUND - Install libxml2-dev packages for devtools
-    become: yes
-    apt:
-      name: libxml2-dev
-    when: saige_version == "0.36.1"
+  - name: WORKAROUND - Check if SPAtest is installed
+    stat:
+      path: "{{ r_install_dir }}/lib/R/library/SPAtest/DESCRIPTION"
+    register: spatest_stat_result
 
-  - name: WORKAROUND - Copy script for downgrading required SPAtest 3.0.0
-    copy: 
-      src: install_SPAtest_3.0.0.R
-      dest: "{{ source_dir }}/install_SPAtest_3.0.0.R"
-    when: saige_version == "0.36.1"
+  - name: WORKAROUND - Check if SPAtest version 3.0.0 is installed
+    lineinfile:
+      path: "{{ r_install_dir }}/lib/R/library/SPAtest/DESCRIPTION"
+      line: "Version: 3.0.0"
+      state: present
+    when: spatest_stat_result.stat.exists
+    register: spatest_version
+    check_mode: yes
+    failed_when: no
 
-  - name: WORKAROUND - Downgrade to required SPAtest 3.0.0
-    command: "{{ bin_dir }}/Rscript {{ source_dir }}/install_SPAtest_3.0.0.R"
-    when: saige_version == "0.36.1"
+  - name: WORKAROUND - Remove new SPAtest and install version 3.0.0
+    command: >
+      {{ bin_dir }}/R -e 'remove.packages("SPAtest"); install.packages("https://cran.r-project.org/src/contrib/Archive/SPAtest/SPAtest_3.0.0.tar.gz", repos=NULL, type="source")'
+    # lineinfile output sets changed to true if the correct version is not present 
+    when: spatest_version.changed
 
   - name: Install SAIGE {{ saige_version }}
-    command: "{{ bin_dir }}/R CMD INSTALL {{ saige_dir }}/{{ saige_release_url | basename }}"
+    command: >
+      {{ bin_dir }}/R CMD INSTALL {{ saige_dir }}/{{ saige_release_url | basename }}
+    args:
+      creates: "{{ r_install_dir }}/lib/R/library/SAIGE"
+
+
+  # Extra R packages
+  - import_tasks: extra-packages.yaml
+
+
+  # Docker specifics
+  - name: Symlink R {{ r_version }} binaries to /usr/local/bin for docker
+    file:
+      src: "{{ r_install_dir }}/bin/{{ item }}"
+      dest: "/usr/local/bin/{{ item }}"
+      state: link
+    loop:
+      - R
+      - Rscript
+    become: yes
+    tags: never, docker
+
+  - name: Clean up directories for docker
+    file:
+      path: "{{ item }}"
+      state: absent
+    loop:
+      - "{{ source_dir }}"
+      - /var/lib/apt/lists/
+    become: yes
+    tags: never, docker

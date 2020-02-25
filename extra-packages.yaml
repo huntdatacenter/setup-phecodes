@@ -1,0 +1,15 @@
+- name: Install extra R packages
+  command: >
+    {{ bin_dir }}/R -e 'install.packages("{{ item }}", repos="https://cloud.r-project.org")'
+  loop:
+    - "data.table"
+    - "tidyr"
+    - "parallel"
+    - "intervals"
+    - "XML"
+    - "RCurl"
+    - "rlist"
+    - "bitops"
+    - "optparse"
+  args:
+    creates: "{{ r_install_dir }}/lib/R/library/{{ item }}"
